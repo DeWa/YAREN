@@ -1,7 +1,11 @@
-import { google } from 'googleapis';
+import { gmail_v1, google } from 'googleapis';
 import * as fs from 'fs';
 import * as readline from 'readline';
+import * as cron from 'node-cron';
 import { OAuth2Client } from 'google-auth-library';
+
+import messageQueueEmitter from './emitter';
+import eventEmitter from './emitter';
 
 export interface GCloudCredentials {
     installed: {
@@ -20,7 +24,10 @@ export default class MailChecker {
         'https://www.googleapis.com/auth/gmail.readonly',
     ];
     private readonly TOKEN_PATH = 'token.json';
+    private readonly POLLING_DELAY = 15; // 15 minutes
+
     private auth: OAuth2Client | undefined;
+    private gmail: gmail_v1.Gmail | undefined;
 
     /**
      * Create an OAuth2 client with the given credentials, and then execute the
@@ -79,6 +86,57 @@ export default class MailChecker {
         });
     }
 
+    private startPolling() {
+        this.checkEmail();
+
+        cron.schedule(`*/${this.POLLING_DELAY} * * * *`, () => {
+            this.checkEmail();
+        });
+        console.info('Email polling started');
+    }
+
+    private async checkEmail() {
+        const response = await this.gmail?.users.messages.list({
+            userId: 'me',
+            includeSpamTrash: false,
+            q: 'from:no-reply@etuovi.com is:unread',
+        });
+
+        if (!response?.data.messages) {
+            console.error('Empty response');
+            return;
+        }
+
+        const { messages } = response.data;
+        if (messages.length > 0) {
+            this.getMessages(messages);
+        }
+    }
+
+    private async setMessageRead(messageId: string) {
+        try {
+            this.gmail?.users.messages.modify({
+                userId: 'me',
+                id: messageId,
+                requestBody: {
+                    removeLabelIds: ['UNREAD'],
+                },
+            });
+        } catch (error) {
+            console.error(error);
+        }
+    }
+
+    private getMessages(messages: gmail_v1.Schema$Message[]) {
+        messages.forEach(async (message) => {
+            const messageResponse = await this.gmail?.users.messages.get({
+                userId: 'me',
+                id: message.id!,
+            });
+            eventEmitter.emit('message', messageResponse);
+        });
+    }
+
     start() {
         // The file token.json stores the user's access and refresh tokens, and is
         // created automatically when the authorization flow completes for the first
@@ -92,36 +150,13 @@ export default class MailChecker {
                 JSON.parse(String(content)),
                 (auth: OAuth2Client) => {
                     this.auth = auth;
+                    this.gmail = google.gmail({
+                        version: 'v1',
+                        auth: this.auth,
+                    });
                     this.startPolling();
                 }
             );
         });
-    }
-
-    private startPolling() {
-        if (typeof this.auth === 'undefined') {
-            console.error('Please authorize Gmail API before use');
-            process.exit(1);
-        }
-
-        const gmail = google.gmail({ version: 'v1', auth: this.auth });
-        gmail.users.labels.list(
-            {
-                userId: 'me',
-            },
-            (err, res) => {
-                if (err)
-                    return console.log('The API returned an error: ' + err);
-                const labels = res!.data.labels;
-                if (labels!.length) {
-                    console.log('Labels:');
-                    labels!.forEach((label) => {
-                        console.log(`- ${label.name}`);
-                    });
-                } else {
-                    console.log('No labels found.');
-                }
-            }
-        );
     }
 }
