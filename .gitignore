@@ -125,3 +125,6 @@ dist
 # Google credentials
 credentials.json
 token.json
+
+# SQlite database
+data/test.db
